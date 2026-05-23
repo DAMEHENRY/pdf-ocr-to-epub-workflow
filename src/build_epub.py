@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+"""Build a readable EPUB from a PDF-to-Markdown export.
+
+This script is intentionally content-neutral. It expects you to provide your
+own source Markdown and optional extracted image folder.
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
+import mimetypes
+import re
+import shutil
+import uuid
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+PAGE_RE = re.compile(r"^--- Page (\d+) / \d+ ---$")
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+HTML_IMAGE_RE = re.compile(
+    r'<div style="text-align: center;"><img src="([^"]+)" alt="([^"]*)" width="([^"]+)" /></div>'
+)
+HTML_CENTER_RE = re.compile(r'<div style="text-align: center;">(.*?)</div>')
+IMAGE_SRC_RE = re.compile(r'src="([^"]+)"')
+FOOTNOTE_RE = re.compile(r"\$\s*\^\{([^}]+)\}\s*\$")
+SPACED_INITIAL_RE = re.compile(r"^(#{2,6}\s+)([A-ZI]) ([a-z].*)$")
+
+
+@dataclass
+class Chapter:
+    title: str
+    filename: str
+    body: list[str] = field(default_factory=list)
+
+
+def slugify(value: str, fallback: str) -> str:
+    value = html.unescape(value)
+    value = re.sub(r"<[^>]+>", "", value)
+    value = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").lower()
+    return value[:56] or fallback
+
+
+def clean_inline(value: str) -> str:
+    value = FOOTNOTE_RE.sub(r"<sup>\1</sup>", value)
+    value = html.escape(value, quote=False)
+    return value.replace("&lt;sup&gt;", "<sup>").replace("&lt;/sup&gt;", "</sup>")
+
+
+def is_ocr_noise(value: str, skip_lines: set[str]) -> bool:
+    if value in skip_lines:
+        return True
+    if "\ufffd" in value:
+        return True
+    if len(value) > 160:
+        dominant = max(value.count(char) for char in set(value)) / len(value)
+        return dominant > 0.55
+    return False
+
+
+def add_paragraph(target: list[str], pending: list[str]) -> None:
+    if not pending:
+        return
+    text = " ".join(part.strip() for part in pending if part.strip())
+    pending.clear()
+    if text:
+        target.append(f"<p>{clean_inline(text)}</p>")
+
+
+def normalize_image_src(src: str, image_prefix: str) -> str:
+    if image_prefix and src.startswith(f"{image_prefix}/"):
+        return src[len(image_prefix) + 1 :]
+    return src
+
+
+def convert_lines(
+    lines: list[str],
+    *,
+    image_prefix: str,
+    skip_lines: set[str],
+    title_fixes: dict[str, str],
+    promote_to_chapter: set[str],
+) -> tuple[list[Chapter], set[str]]:
+    chapters: list[Chapter] = []
+    image_refs: set[str] = set()
+    current = Chapter("Front Matter", "chapter-000-front-matter.xhtml")
+    chapters.append(current)
+    pending_para: list[str] = []
+
+    def start_chapter(title: str) -> None:
+        nonlocal current
+        add_paragraph(current.body, pending_para)
+        filename = f"chapter-{len(chapters):03d}-{slugify(title, f'chapter-{len(chapters):03d}')}.xhtml"
+        current = Chapter(title=html.unescape(title), filename=filename)
+        current.body.append(f"<h1>{clean_inline(title)}</h1>")
+        chapters.append(current)
+
+    for raw_line in lines:
+        line = raw_line.rstrip("\n")
+        stripped = line.strip()
+        if PAGE_RE.match(stripped):
+            add_paragraph(current.body, pending_para)
+            continue
+        if not stripped:
+            add_paragraph(current.body, pending_para)
+            continue
+        if is_ocr_noise(stripped, skip_lines):
+            add_paragraph(current.body, pending_para)
+            continue
+        stripped = SPACED_INITIAL_RE.sub(r"\1\2\3", stripped)
+
+        heading = HEADING_RE.match(stripped)
+        if heading:
+            level = len(heading.group(1))
+            title = title_fixes.get(heading.group(2).strip(), heading.group(2).strip())
+            if title in skip_lines:
+                add_paragraph(current.body, pending_para)
+                continue
+            if title in promote_to_chapter or level == 1:
+                start_chapter(title)
+            else:
+                add_paragraph(current.body, pending_para)
+                tag = f"h{min(level, 6)}"
+                current.body.append(f"<{tag}>{clean_inline(title)}</{tag}>")
+            continue
+
+        image_match = HTML_IMAGE_RE.match(stripped)
+        if image_match:
+            add_paragraph(current.body, pending_para)
+            src, alt, width = image_match.groups()
+            src = normalize_image_src(src, image_prefix)
+            image_refs.add(src)
+            current.body.append(
+                '<figure class="image">'
+                f'<img src="../images/{html.escape(src, quote=True)}" '
+                f'alt="{html.escape(alt, quote=True)}" style="max-width:{html.escape(width, quote=True)};" />'
+                "</figure>"
+            )
+            continue
+
+        center_match = HTML_CENTER_RE.match(stripped)
+        if center_match:
+            add_paragraph(current.body, pending_para)
+            current.body.append(f'<p class="center">{clean_inline(center_match.group(1))}</p>')
+            continue
+
+        for src in IMAGE_SRC_RE.findall(stripped):
+            image_refs.add(normalize_image_src(src, image_prefix))
+        pending_para.append(stripped)
+
+    add_paragraph(current.body, pending_para)
+    return [chapter for chapter in chapters if chapter.body], image_refs
+
+
+def chapter_xhtml(chapter: Chapter, language: str) -> str:
+    return f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="{language}" xml:lang="{language}">
+<head>
+  <title>{html.escape(chapter.title)}</title>
+  <link rel="stylesheet" type="text/css" href="../styles.css" />
+</head>
+<body>
+{chr(10).join(chapter.body)}
+</body>
+</html>
+'''
+
+
+def build_nav(chapters: list[Chapter], language: str) -> str:
+    items = "\n".join(
+        f'    <li><a href="xhtml/{chapter.filename}">{html.escape(chapter.title)}</a></li>'
+        for chapter in chapters
+    )
+    return f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="{language}" xml:lang="{language}">
+<head>
+  <title>Contents</title>
+  <link rel="stylesheet" type="text/css" href="styles.css" />
+</head>
+<body>
+  <nav epub:type="toc" id="toc">
+    <h1>Contents</h1>
+    <ol>
+{items}
+    </ol>
+  </nav>
+</body>
+</html>
+'''
+
+
+def build_cover_page(title: str, language: str) -> str:
+    return f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="{language}" xml:lang="{language}">
+<head>
+  <title>Cover</title>
+  <link rel="stylesheet" type="text/css" href="../styles.css" />
+</head>
+<body class="cover-page">
+  <section class="generated-cover">
+    <h1>{html.escape(title)}</h1>
+  </section>
+</body>
+</html>
+'''
+
+
+def build_ncx(chapters: list[Chapter], book_id: str, title: str, author: str) -> str:
+    nav_points = []
+    for idx, chapter in enumerate(chapters, 1):
+        nav_points.append(
+            f'''    <navPoint id="navPoint-{idx}" playOrder="{idx}">
+      <navLabel><text>{html.escape(chapter.title)}</text></navLabel>
+      <content src="xhtml/{chapter.filename}"/>
+    </navPoint>'''
+        )
+    return f'''<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head>
+    <meta name="dtb:uid" content="{book_id}"/>
+    <meta name="dtb:depth" content="1"/>
+    <meta name="dtb:totalPageCount" content="0"/>
+    <meta name="dtb:maxPageNumber" content="0"/>
+  </head>
+  <docTitle><text>{html.escape(title)}</text></docTitle>
+  <docAuthor><text>{html.escape(author)}</text></docAuthor>
+  <navMap>
+{chr(10).join(nav_points)}
+  </navMap>
+</ncx>
+'''
+
+
+def media_type(path: Path) -> str:
+    if path.suffix.lower() in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    guessed = mimetypes.guess_type(path.name)[0]
+    return guessed or "application/octet-stream"
+
+
+def build_opf(
+    chapters: list[Chapter],
+    image_refs: set[str],
+    book_id: str,
+    *,
+    title: str,
+    author: str,
+    language: str,
+    image_dir: Path | None,
+) -> str:
+    manifest = [
+        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+        '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
+        '<item id="css" href="styles.css" media-type="text/css"/>',
+        '<item id="cover-page" href="xhtml/cover.xhtml" media-type="application/xhtml+xml"/>',
+    ]
+    spine = ['<itemref idref="cover-page" linear="no"/>']
+    for idx, chapter in enumerate(chapters):
+        item_id = f"chapter-{idx:03d}"
+        manifest.append(
+            f'<item id="{item_id}" href="xhtml/{chapter.filename}" media-type="application/xhtml+xml"/>'
+        )
+        spine.append(f'<itemref idref="{item_id}"/>')
+    for idx, src in enumerate(sorted(image_refs)):
+        source_path = image_dir / src if image_dir else Path(src)
+        manifest.append(
+            f'<item id="image-{idx:03d}" href="images/{html.escape(src, quote=True)}" '
+            f'media-type="{media_type(source_path)}"/>'
+        )
+    return f'''<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">{book_id}</dc:identifier>
+    <dc:title>{html.escape(title)}</dc:title>
+    <dc:creator>{html.escape(author)}</dc:creator>
+    <dc:language>{language}</dc:language>
+  </metadata>
+  <manifest>
+    {chr(10).join(manifest)}
+  </manifest>
+  <spine toc="ncx">
+    {chr(10).join(spine)}
+  </spine>
+</package>
+'''
+
+
+def write_epub(build_dir: Path, output: Path) -> None:
+    if output.exists():
+        output.unlink()
+    with zipfile.ZipFile(output, "w") as epub:
+        epub.write(build_dir / "mimetype", "mimetype", compress_type=zipfile.ZIP_STORED)
+        for path in sorted(build_dir.rglob("*")):
+            if path.is_file() and path.name != "mimetype":
+                epub.write(path, path.relative_to(build_dir), compress_type=zipfile.ZIP_DEFLATED)
+
+
+def read_line_set(path: Path | None) -> set[str]:
+    if not path:
+        return set()
+    return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+
+
+def read_title_fixes(path: Path | None) -> dict[str, str]:
+    if not path:
+        return {}
+    fixes: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        old, sep, new = line.partition("=>")
+        if sep:
+            fixes[old.strip()] = new.strip()
+    return fixes
+
+
+def build(args: argparse.Namespace) -> None:
+    source_md = args.input.resolve()
+    output = args.output.resolve()
+    build_dir = args.build_dir.resolve()
+    oebps = build_dir / "OEBPS"
+    xhtml_dir = oebps / "xhtml"
+    images_dir = oebps / "images"
+    meta_inf = build_dir / "META-INF"
+
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+    xhtml_dir.mkdir(parents=True)
+    images_dir.mkdir(parents=True)
+    meta_inf.mkdir(parents=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    chapters, image_refs = convert_lines(
+        source_md.read_text(encoding="utf-8").splitlines(),
+        image_prefix=args.image_prefix,
+        skip_lines=read_line_set(args.skip_lines),
+        title_fixes=read_title_fixes(args.title_fixes),
+        promote_to_chapter=read_line_set(args.promote_to_chapter),
+    )
+
+    (xhtml_dir / "cover.xhtml").write_text(build_cover_page(args.title, args.language), encoding="utf-8")
+    for chapter in chapters:
+        (xhtml_dir / chapter.filename).write_text(chapter_xhtml(chapter, args.language), encoding="utf-8")
+
+    if args.image_dir:
+        for src in image_refs:
+            src_path = args.image_dir / src
+            if src_path.exists():
+                target = images_dir / src
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_path, target)
+
+    (build_dir / "mimetype").write_text("application/epub+zip", encoding="ascii")
+    (meta_inf / "container.xml").write_text(
+        '''<?xml version="1.0" encoding="utf-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+''',
+        encoding="utf-8",
+    )
+    (oebps / "styles.css").write_text(Path(args.css).read_text(encoding="utf-8"), encoding="utf-8")
+    book_id = f"urn:uuid:{uuid.uuid4()}"
+    (oebps / "nav.xhtml").write_text(build_nav(chapters, args.language), encoding="utf-8")
+    (oebps / "toc.ncx").write_text(build_ncx(chapters, book_id, args.title, args.author), encoding="utf-8")
+    (oebps / "content.opf").write_text(
+        build_opf(
+            chapters,
+            image_refs,
+            book_id,
+            title=args.title,
+            author=args.author,
+            language=args.language,
+            image_dir=args.image_dir,
+        ),
+        encoding="utf-8",
+    )
+    write_epub(build_dir, output)
+    print(f"Wrote {output}")
+    print(f"Chapters: {len(chapters)}")
+    print(f"Images referenced: {len(image_refs)}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", required=True, type=Path, help="PDF-to-Markdown export to convert")
+    parser.add_argument("--output", required=True, type=Path, help="Output EPUB path")
+    parser.add_argument("--title", required=True, help="Book title metadata")
+    parser.add_argument("--author", default="Unknown", help="Book author metadata")
+    parser.add_argument("--language", default="en", help="BCP 47 language code, e.g. en or zh-CN")
+    parser.add_argument("--image-dir", type=Path, help="Directory containing extracted images")
+    parser.add_argument("--image-prefix", default="imgs", help="Markdown image path prefix to strip")
+    parser.add_argument("--build-dir", default=Path("build/epub"), type=Path, help="Temporary EPUB build directory")
+    parser.add_argument("--css", default=Path("assets/default.css"), type=Path, help="CSS file to embed")
+    parser.add_argument("--skip-lines", type=Path, help="Optional newline-delimited OCR noise lines to drop")
+    parser.add_argument("--title-fixes", type=Path, help="Optional title fixes file: old => new")
+    parser.add_argument("--promote-to-chapter", type=Path, help="Optional newline-delimited headings to promote")
+    return parser.parse_args()
+
+
+def main() -> None:
+    build(parse_args())
+
+
+if __name__ == "__main__":
+    main()

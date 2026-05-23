@@ -1,0 +1,142 @@
+# PDF/OCR Markdown to EPUB Workflow
+
+Build a readable EPUB from a PDF-to-Markdown or OCR export.
+
+This repository contains only the conversion workflow. It does not include
+books, PDF files, extracted OCR text, extracted images, or generated EPUBs.
+Use it only with material you have the right to process.
+
+## What It Does
+
+- Optionally runs PaddleOCR-VL on a machine that has the model installed.
+- Splits a Markdown export into EPUB chapters using level-one headings.
+- Removes PDF page marker lines such as `--- Page 12 / 300 ---`.
+- Joins OCR-wrapped lines back into paragraphs.
+- Preserves simple headings, centered lines, and image references.
+- Converts Markdown-exported footnote markers like `$ ^{1} $` to superscripts.
+- Creates EPUB navigation, OPF metadata, NCX table of contents, CSS, and zip packaging.
+- Supports optional cleanup files for OCR noise, title fixes, and heading promotion.
+
+## Quick Start
+
+Run the EPUB sample:
+
+```bash
+python3 src/build_epub.py \
+  --input examples/sample.md \
+  --output dist/sample.epub \
+  --title "A Small Sample" \
+  --author "Example Author" \
+  --skip-lines examples/skip-lines.txt
+```
+
+## OCR Model Downloads
+
+The OCR step uses two PaddlePaddle models:
+
+- PaddleOCR-VL: <https://huggingface.co/PaddlePaddle/PaddleOCR-VL>
+- PP-DocLayoutV2: <https://huggingface.co/PaddlePaddle/PP-DocLayoutV2>
+
+Install the Hugging Face CLI, then download the model files into predictable
+local directories:
+
+```bash
+python3 -m pip install -U "huggingface_hub[cli]"
+
+huggingface-cli download PaddlePaddle/PaddleOCR-VL \
+  --local-dir ~/.paddlex/official_models/PaddleOCR-VL
+
+huggingface-cli download PaddlePaddle/PP-DocLayoutV2 \
+  --local-dir ~/.paddlex/official_models/PP-DocLayoutV2
+```
+
+These model files are large generated artifacts and should not be committed to
+your repository.
+
+Run PaddleOCR-VL first, if your PDF needs OCR:
+
+```bash
+python3 src/ocr_paddle_vl.py \
+  --input ~/my_pdfs/book.pdf \
+  --output-dir ~/ocr_results/book \
+  --layout-model-dir ~/.paddlex/official_models/PP-DocLayoutV2 \
+  --vl-model-dir ~/.paddlex/official_models/PaddleOCR-VL \
+  --json
+```
+
+## OS Support Notes
+
+The EPUB builder is plain Python and should work on macOS, Linux, and Windows.
+
+The local PaddleOCR-VL OCR step is more restrictive. For GPU OCR, prefer Linux,
+WSL2 on Windows, or a Docker container with NVIDIA GPU access. Native Windows
+is not the recommended path for this doc-parser workflow; the PP-DocLayoutV2
+model card specifically tells Windows users to use WSL or Docker. macOS can run
+the EPUB builder comfortably, but it is usually not the right machine for this
+PaddlePaddle GPU OCR stack.
+
+Before running heavy OCR, check whether the PDF already has a usable text layer:
+
+```bash
+pdfinfo book.pdf | sed -n '1,80p'
+pdftotext -layout -f 1 -l 3 book.pdf - | sed -n '1,120p'
+```
+
+If this produces clean text, you may only need text cleanup plus EPUB packaging.
+
+Run your own export:
+
+```bash
+python3 src/build_epub.py \
+  --input ~/ocr_results/book/combined.md \
+  --output dist/book.epub \
+  --title "Book Title" \
+  --author "Author Name" \
+  --image-dir path/to/imgs
+```
+
+## Optional Cleanup Files
+
+`--skip-lines` accepts one exact line per row. Matching lines are dropped.
+
+```text
+OCR NOISE LINE
+Another repeated artifact
+```
+
+`--title-fixes` accepts one replacement per row:
+
+```text
+Bad OCR Chapter Tltle => Bad OCR Chapter Title
+```
+
+`--promote-to-chapter` accepts one heading title per row. Matching non-H1
+headings are promoted into EPUB chapters.
+
+```text
+Appendix A
+Bibliography
+```
+
+## Repository Hygiene
+
+The included `.gitignore` is intentionally strict. It excludes common source
+book formats, generated EPUBs, OCR exports, extracted images, and build
+directories.
+
+Before publishing a repository, check that no copyrighted source material is
+tracked:
+
+```bash
+git status --short
+git ls-files
+```
+
+## Notes
+
+Different PDF-to-Markdown tools emit different HTML snippets and image paths.
+This workflow is a small, hackable baseline rather than a universal EPUB
+typesetting engine. The safest extension pattern is to add converter-specific
+normalizers while keeping source books and generated outputs out of Git.
+
+For a Windows GPU backend, see [docs/windows-wsl-ocr.md](docs/windows-wsl-ocr.md).

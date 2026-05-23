@@ -1,0 +1,1 @@
+Repeated OCR artifacts can be removed with a skip-lines file.

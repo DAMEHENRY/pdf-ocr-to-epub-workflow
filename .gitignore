@@ -1,0 +1,24 @@
+# Generated output
+build/
+dist/
+ocr_results/
+*.epub
+
+# Source books and extracted copyrighted content
+*.pdf
+*.djvu
+*.mobi
+*.azw
+*.azw3
+*_full.md
+*_full.json
+imgs/
+images/
+epub_build/
+
+# Local/editor files
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
