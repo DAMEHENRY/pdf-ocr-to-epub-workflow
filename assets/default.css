@@ -41,6 +41,28 @@ nav ol {
   margin: 0;
 }
 
+.cover-image {
+  display: block;
+  height: auto;
+  margin: 0 auto;
+  max-height: 100vh;
+  max-width: 100%;
+}
+
+table {
+  border-collapse: collapse;
+  display: block;
+  font-size: 0.9em;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+td,
+th {
+  border: 1px solid #888;
+  padding: 0.35em;
+}
+
 .generated-cover {
   align-items: center;
   background: #173a33;

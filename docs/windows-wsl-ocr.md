@@ -137,6 +137,133 @@ python3 ~/pdf-md-to-epub-workflow/src/ocr_paddle_vl.py \
 
 Then call the wrapper with simple arguments.
 
+## Do Not Rely on WSL `nohup` Across Windows SSH
+
+On some Windows OpenSSH setups, a detached Linux process is still tied to the
+`wsl.exe` job created by the SSH session. When that Windows-side job exits, WSL
+may stop even though the command used `nohup`.
+
+For full books, prefer a Windows Scheduled Task that launches a short WSL
+wrapper under the logged-in Windows account. Keep stdout and stderr in a
+book-specific `stream.log`, verify the Windows task and Linux process once, and
+remove the task after a successful exit.
+
+## Large PDFs and 8 GB GPUs
+
+Do not pass a full several-hundred-page scanned PDF to `pipeline.predict()` as
+one object. Render it to `page-*.jpg` files and run `src/ocr_pages_stream.py`.
+The page-level output provides deterministic resume behavior and lets dense code
+or formula pages fall back to an exact full-page image only when GPU OOM is
+confirmed. Other exceptions remain fatal and visible.
+
+Windows SFTP cannot read the WSL `/home` tree directly. Tar the result to
+`/mnt/c/Users/<user>/` before retrieving it with SCP.
+
+## Production Runbook
+
+### 1. Preflight the source and remote host
+
+Check the PDF before committing GPU time:
+
+```bash
+pdfinfo book.pdf
+pdftotext -layout -f 1 -l 5 book.pdf - | sed -n '1,160p'
+```
+
+If the text layer is clean, direct extraction may be preferable. Full OCR is
+still useful when formulas, code, tables, or figures require layout parsing.
+
+Before transfer, confirm that SSH works, WSL starts, `nvidia-smi` sees the GPU,
+the model directories exist, and the target disk has enough free space. Inspect
+shared input directories before running a legacy batch script: a glob such as
+`~/my_pdfs/*.pdf` can unintentionally reprocess old books.
+
+### 2. Render one deterministic image per page
+
+```bash
+mkdir -p /tmp/book-images
+pdftoppm -jpeg -r 170 -jpegopt quality=88,progressive=y,optimize=y \
+  book.pdf /tmp/book-images/page
+```
+
+Keep the generated names in lexical page order (`page-001.jpg`, etc.). Verify
+the rendered image count against `pdfinfo` before transfer.
+
+### 3. Run the resume-safe page worker
+
+```bash
+source ~/paddle_env/bin/activate
+python ~/pdf-ocr-to-epub-workflow/src/ocr_pages_stream.py \
+  --input-dir /path/to/book-images \
+  --output-dir ~/ocr_results/book \
+  --layout-model-dir ~/.paddlex/official_models/PP-DocLayoutV2 \
+  --vl-model-dir ~/.paddlex/official_models/PaddleOCR-VL \
+  >> ~/ocr_results/book/stream.log 2>&1
+```
+
+The worker considers a page complete only when both its Markdown and JSON files
+exist. It rebuilds `combined.md` periodically, so a stopped run can resume
+without repeating completed pages.
+
+Only a confirmed Paddle `ResourceExhaustedError`/GPU OOM activates the full-page
+image fallback. This is intentional for dense code, formula, or diagram pages:
+preserving the exact page is safer than silently dropping it or returning
+corrupted OCR. Other exceptions remain fatal.
+
+### 4. Let Windows own unattended runs
+
+Create a short WSL wrapper for the command above, then register a book-specific
+Windows Scheduled Task whose action is similar to:
+
+```text
+C:\Windows\System32\wsl.exe -e bash /mnt/c/Users/<user>/run-book-ocr.sh
+```
+
+Recommended task properties:
+
+- Principal: `<COMPUTERNAME>\<USERNAME>`
+- Logon type: `Interactive`
+- Execution limit: long enough for the book
+- Allow start on battery and do not stop solely because power changes
+
+Verify both layers once:
+
+```powershell
+Get-ScheduledTask -TaskName "BookOCR"
+Get-ScheduledTaskInfo -TaskName "BookOCR"
+```
+
+```bash
+pgrep -af ocr_pages_stream.py
+tail -n 30 ~/ocr_results/book/stream.log
+```
+
+Remove the task after it reaches `LastTaskResult = 0`.
+
+### 5. Retrieve across the Windows/WSL boundary
+
+Windows OpenSSH serves the Windows filesystem, not the WSL `/home` tree. Stage
+an archive in the mounted Windows user directory:
+
+```bash
+tar -C ~/ocr_results -czf /mnt/c/Users/<user>/book-ocr.tar.gz book
+```
+
+Retrieve that archive with SCP and extract it on the editing machine.
+
+### 6. Audit before EPUB packaging
+
+Do not stop at `COMPLETE N/N`. Check:
+
+- Markdown and JSON counts match the PDF page count.
+- Page markers are continuous.
+- Every referenced image exists.
+- Full-page fallbacks are listed and visually justified.
+- Real chapter headings are promoted and code/comments are not fake chapters.
+- EPUB XHTML/OPF/NCX parse as XML.
+- `mimetype` is first and uncompressed, manifest targets exist, and the ZIP
+  passes an integrity test.
+
 ## First Check: Does The PDF Already Have Text?
 
 Before launching heavy OCR, check whether the PDF has a usable text layer:
