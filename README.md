@@ -16,6 +16,9 @@ Use it only with material you have the right to process.
 - Converts Markdown-exported footnote markers like `$ ^{1} $` to superscripts.
 - Creates EPUB navigation, OPF metadata, NCX table of contents, CSS, and zip packaging.
 - Supports optional cleanup files for OCR noise, title fixes, and heading promotion.
+- Provides a resume-safe page-JPEG runner for large books and 8 GB GPUs.
+- Preserves confirmed GPU-OOM pages as full-page images instead of dropping them.
+- Supports Markdown image fallbacks, OCR HTML tables, and an optional real cover image.
 
 ## Quick Start
 
@@ -64,6 +67,22 @@ python3 src/ocr_paddle_vl.py \
   --json
 ```
 
+For large books, render one JPEG per page and use the resume-safe runner:
+
+```bash
+pdftoppm -jpeg -r 170 -jpegopt quality=88,progressive=y,optimize=y \
+  book.pdf ~/book-images/page
+
+python3 src/ocr_pages_stream.py \
+  --input-dir ~/book-images \
+  --output-dir ~/ocr_results/book \
+  --layout-model-dir ~/.paddlex/official_models/PP-DocLayoutV2 \
+  --vl-model-dir ~/.paddlex/official_models/PaddleOCR-VL
+```
+
+The runner writes each page immediately, resumes from existing Markdown/JSON pairs,
+and uses a full-page image only when Paddle reports a GPU out-of-memory error.
+
 ## OS Support Notes
 
 The EPUB builder is plain Python and should work on macOS, Linux, and Windows.
@@ -92,7 +111,8 @@ python3 src/build_epub.py \
   --output dist/book.epub \
   --title "Book Title" \
   --author "Author Name" \
-  --image-dir path/to/imgs
+  --image-dir path/to/imgs \
+  --cover-image path/to/cover.jpg
 ```
 
 ## Optional Cleanup Files

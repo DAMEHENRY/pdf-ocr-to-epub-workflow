@@ -25,6 +25,7 @@ HTML_IMAGE_RE = re.compile(
 )
 HTML_CENTER_RE = re.compile(r'<div style="text-align: center;">(.*?)</div>')
 IMAGE_SRC_RE = re.compile(r'src="([^"]+)"')
+MARKDOWN_IMAGE_RE = re.compile(r'^!\[([^]]*)\]\(([^)]+)\)$')
 FOOTNOTE_RE = re.compile(r"\$\s*\^\{([^}]+)\}\s*\$")
 SPACED_INITIAL_RE = re.compile(r"^(#{2,6}\s+)([A-ZI]) ([a-z].*)$")
 
@@ -140,6 +141,25 @@ def convert_lines(
             )
             continue
 
+        markdown_image = MARKDOWN_IMAGE_RE.match(stripped)
+        if markdown_image:
+            add_paragraph(current.body, pending_para)
+            alt, src = markdown_image.groups()
+            src = normalize_image_src(src, image_prefix)
+            image_refs.add(src)
+            current.body.append(
+                '<figure class="image">'
+                f'<img src="../images/{html.escape(src, quote=True)}" '
+                f'alt="{html.escape(alt, quote=True)}" />'
+                "</figure>"
+            )
+            continue
+
+        if stripped.startswith("<table") and stripped.endswith("</table>"):
+            add_paragraph(current.body, pending_para)
+            current.body.append(re.sub(r"\bborder=([0-9]+)", r'border="\1"', stripped))
+            continue
+
         center_match = HTML_CENTER_RE.match(stripped)
         if center_match:
             add_paragraph(current.body, pending_para)
@@ -193,7 +213,13 @@ def build_nav(chapters: list[Chapter], language: str) -> str:
 '''
 
 
-def build_cover_page(title: str, language: str) -> str:
+def build_cover_page(title: str, language: str, cover_image: str | None = None) -> str:
+    content = (
+        f'<img class="cover-image" src="../images/{html.escape(cover_image, quote=True)}" '
+        f'alt="{html.escape(title, quote=True)}" />'
+        if cover_image
+        else f'<section class="generated-cover"><h1>{html.escape(title)}</h1></section>'
+    )
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" lang="{language}" xml:lang="{language}">
@@ -202,9 +228,7 @@ def build_cover_page(title: str, language: str) -> str:
   <link rel="stylesheet" type="text/css" href="../styles.css" />
 </head>
 <body class="cover-page">
-  <section class="generated-cover">
-    <h1>{html.escape(title)}</h1>
-  </section>
+  {content}
 </body>
 </html>
 '''
@@ -252,6 +276,7 @@ def build_opf(
     author: str,
     language: str,
     image_dir: Path | None,
+    cover_image: str | None,
 ) -> str:
     manifest = [
         '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
@@ -268,9 +293,10 @@ def build_opf(
         spine.append(f'<itemref idref="{item_id}"/>')
     for idx, src in enumerate(sorted(image_refs)):
         source_path = image_dir / src if image_dir else Path(src)
+        properties = ' properties="cover-image"' if src == cover_image else ""
         manifest.append(
             f'<item id="image-{idx:03d}" href="images/{html.escape(src, quote=True)}" '
-            f'media-type="{media_type(source_path)}"/>'
+            f'media-type="{media_type(source_path)}"{properties}/>'
         )
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="3.0">
@@ -343,7 +369,15 @@ def build(args: argparse.Namespace) -> None:
         promote_to_chapter=read_line_set(args.promote_to_chapter),
     )
 
-    (xhtml_dir / "cover.xhtml").write_text(build_cover_page(args.title, args.language), encoding="utf-8")
+    cover_src: str | None = None
+    if args.cover_image:
+        cover_src = f"cover{args.cover_image.suffix.lower()}"
+        shutil.copy2(args.cover_image.resolve(), images_dir / cover_src)
+        image_refs.add(cover_src)
+
+    (xhtml_dir / "cover.xhtml").write_text(
+        build_cover_page(args.title, args.language, cover_src), encoding="utf-8"
+    )
     for chapter in chapters:
         (xhtml_dir / chapter.filename).write_text(chapter_xhtml(chapter, args.language), encoding="utf-8")
 
@@ -379,6 +413,7 @@ def build(args: argparse.Namespace) -> None:
             author=args.author,
             language=args.language,
             image_dir=args.image_dir,
+            cover_image=cover_src,
         ),
         encoding="utf-8",
     )
@@ -396,6 +431,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--author", default="Unknown", help="Book author metadata")
     parser.add_argument("--language", default="en", help="BCP 47 language code, e.g. en or zh-CN")
     parser.add_argument("--image-dir", type=Path, help="Directory containing extracted images")
+    parser.add_argument("--cover-image", type=Path, help="Optional cover image")
     parser.add_argument("--image-prefix", default="imgs", help="Markdown image path prefix to strip")
     parser.add_argument("--build-dir", default=Path("build/epub"), type=Path, help="Temporary EPUB build directory")
     parser.add_argument("--css", default=Path("assets/default.css"), type=Path, help="CSS file to embed")
