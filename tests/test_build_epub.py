@@ -112,6 +112,30 @@ More body text.
         self.assertEqual(bodies, {})
         self.assertEqual(links, {})
 
+    def test_mid_paragraph_page_break_does_not_create_blank_gap(self) -> None:
+        markdown = """--- Page 1 / 2 ---
+
+# Chapter One
+
+It is my firm belief that without prior knowledge,
+
+--- Page 2 / 2 ---
+
+estimated causal effects are rarely believable.
+
+A genuinely new paragraph starts here.
+"""
+        chapters, _ = BUILD_EPUB.convert_lines(
+            markdown.splitlines(), image_prefix="imgs", skip_lines=set(),
+            title_fixes={}, promote_to_chapter=set()
+        )
+        chapter = "\n".join(chapters[0].body)
+        self.assertIn(
+            "<p>It is my firm belief that without prior knowledge, estimated causal effects are rarely believable.</p>",
+            chapter,
+        )
+        self.assertIn("<p>A genuinely new paragraph starts here.</p>", chapter)
+
 
 if __name__ == "__main__":
     unittest.main()

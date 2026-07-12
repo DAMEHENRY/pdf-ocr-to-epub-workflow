@@ -58,6 +58,20 @@ def looks_like_footnote_prose(value: str) -> bool:
     return bool(first_alpha and (first_alpha.isupper() or ord(first_alpha) > 127))
 
 
+def next_nonblank_line(lines: list[str], start: int) -> str:
+    return next((line.strip() for line in lines[start:] if line.strip()), "")
+
+
+def should_join_page_break(pending: list[str], next_line: str) -> bool:
+    if not pending or not next_line or HEADING_RE.match(next_line):
+        return False
+    next_alpha = next((char for char in next_line if char.isalpha()), "")
+    starts_lower = bool(next_alpha and next_alpha.islower())
+    previous = pending[-1].rstrip()
+    previous_unfinished = bool(previous and previous[-1] not in ".!?。！？:：")
+    return starts_lower or previous_unfinished
+
+
 def clean_inline(value: str, footnote_links: dict[str, str] | None = None) -> str:
     replacements: list[str] = []
 
@@ -167,9 +181,12 @@ def convert_lines(
     code_lines: list[str] = []
     used_ids: dict[str, int] = {}
     current_page = 0
+    pending_footnote_links: dict[str, str] = {}
+    carrying_page_break = False
 
     def flush_paragraph() -> None:
-        add_paragraph(current.body, pending_para, footnote_links_by_page.get(current_page))
+        add_paragraph(current.body, pending_para, pending_footnote_links)
+        pending_footnote_links.clear()
 
     def heading_id(title: str) -> str:
         base = slugify(title, "section")
@@ -216,12 +233,18 @@ def convert_lines(
             continue
         page_marker = PAGE_RE.match(stripped)
         if page_marker:
-            flush_paragraph()
+            next_line = next_nonblank_line(lines, line_index + 1)
+            carrying_page_break = should_join_page_break(pending_para, next_line)
+            if not carrying_page_break:
+                flush_paragraph()
             current_page = int(page_marker.group(1))
             continue
         if not stripped:
+            if PAGE_RE.match(next_nonblank_line(lines, line_index + 1)) or carrying_page_break:
+                continue
             flush_paragraph()
             continue
+        carrying_page_break = False
         if is_ocr_noise(stripped, skip_lines):
             flush_paragraph()
             continue
@@ -298,6 +321,7 @@ def convert_lines(
             flush_paragraph()
             current.body.append(f'<p class="printed-toc-entry">{clean_inline(stripped)}</p>')
         else:
+            pending_footnote_links.update(footnote_links_by_page.get(current_page, {}))
             pending_para.append(stripped)
 
     add_code_block()
