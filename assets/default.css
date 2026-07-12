@@ -57,6 +57,24 @@ nav a,
   color: #666;
 }
 
+.printed-toc-entry.toc-level-1 {
+  font-family: sans-serif;
+  font-weight: 600;
+  margin-top: 0.35em;
+}
+
+.printed-toc-entry.toc-level-2 {
+  border-bottom-color: #eee;
+  font-size: 0.94em;
+  padding-left: 1.25em;
+}
+
+.printed-toc-entry.toc-level-3 {
+  border-bottom-color: #eee;
+  font-size: 0.9em;
+  padding-left: 2.25em;
+}
+
 pre {
   background: #f5f5f5;
   border-left: 0.25em solid #bbb;

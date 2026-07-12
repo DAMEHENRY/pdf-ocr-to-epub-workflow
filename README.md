@@ -159,7 +159,8 @@ git ls-files
 XML validity is necessary but not sufficient. Before delivery, verify all of the following:
 
 - The reader's navigation panel lists the intended chapters and omits synthetic `Front Matter` labels.
-- The printed Contents page is visually separated into entries and every expected entry is clickable.
+- The printed Contents page is visually separated into entries, strips obsolete print page numbers/leaders,
+  uses consistent chapter/subsection indentation, and makes every expected entry clickable.
 - Every internal link resolves to an existing XHTML file and `id` anchor.
 - Fenced code remains a code block; `#` comments do not become headings.
 - Tables fit the viewport, images are not clipped, and long code can wrap or scroll.

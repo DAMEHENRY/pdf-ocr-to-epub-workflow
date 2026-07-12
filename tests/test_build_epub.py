@@ -60,6 +60,10 @@ x <- 1
                 nav = epub.read("OEBPS/nav.xhtml").decode()
                 self.assertIn('href="chapter-002-chapter-one.xhtml#chapter-one"', contents)
                 self.assertIn('href="chapter-002-chapter-one.xhtml#section-a"', contents)
+                self.assertIn('class="printed-toc-entry toc-level-1"', contents)
+                self.assertIn('class="printed-toc-entry toc-level-2"', contents)
+                self.assertNotIn("Chapter One 1", contents)
+                self.assertNotIn("Section A 2", contents)
                 self.assertIn('<pre><code class="language-r"># This is code, not a heading', chapter)
                 self.assertNotIn("This is code, not a heading</a>", nav)
                 for name in epub.namelist():

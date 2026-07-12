@@ -35,7 +35,7 @@ class Chapter:
     title: str
     filename: str
     body: list[str] = field(default_factory=list)
-    headings: list[tuple[str, str]] = field(default_factory=list)
+    headings: list[tuple[str, str, int]] = field(default_factory=list)
 
 
 def slugify(value: str, fallback: str) -> str:
@@ -121,7 +121,7 @@ def convert_lines(
         current = Chapter(title=html.unescape(title), filename=filename)
         anchor = heading_id(title)
         current.body.append(f'<h1 id="{anchor}">{clean_inline(title)}</h1>')
-        current.headings.append((title, anchor))
+        current.headings.append((title, anchor, 1))
         chapters.append(current)
 
     for raw_line in lines:
@@ -163,7 +163,7 @@ def convert_lines(
                 tag = f"h{min(level, 6)}"
                 anchor = heading_id(title)
                 current.body.append(f'<{tag} id="{anchor}">{clean_inline(title)}</{tag}>')
-                current.headings.append((title, anchor))
+                current.headings.append((title, anchor, level))
             continue
 
         image_match = HTML_IMAGE_RE.match(stripped)
@@ -226,13 +226,13 @@ def normalize_toc_label(value: str) -> str:
 
 
 def link_printed_contents(chapters: list[Chapter]) -> None:
-    targets: list[tuple[str, str]] = []
+    targets: list[tuple[str, str, int]] = []
     for chapter in chapters:
         if chapter.title.casefold() in {"contents", "table of contents", "目录"}:
             continue
         targets.extend(
-            (normalize_toc_label(title), f"{chapter.filename}#{anchor}")
-            for title, anchor in chapter.headings
+            (normalize_toc_label(title), f"{chapter.filename}#{anchor}", level)
+            for title, anchor, level in chapter.headings
         )
 
     cursor = 0
@@ -250,20 +250,21 @@ def link_printed_contents(chapters: list[Chapter]) -> None:
             rendered = match.group(1)
             label = normalize_toc_label(rendered)
             found = next(
-                ((index, href) for index, (title, href) in enumerate(targets[cursor:], cursor) if title == label),
+                ((index, href, level) for index, (title, href, level) in enumerate(targets[cursor:], cursor) if title == label),
                 None,
             )
             if found is None:
-                found = next(((index, href) for index, (title, href) in enumerate(targets) if title == label), None)
+                found = next(((index, href, level) for index, (title, href, level) in enumerate(targets) if title == label), None)
             if found is None:
                 plain = html.unescape(re.sub(r"<[^>]+>", "", rendered))
                 if page_suffix_re.search(plain):
-                    linked.append(f'<p class="printed-toc-entry unlinked">{rendered}</p>')
+                    linked.append(f'<p class="printed-toc-entry unlinked">{clean_inline(label)}</p>')
                 continue
-            index, href = found
+            index, href, level = found
             cursor = index + 1
             linked.append(
-                f'<p class="printed-toc-entry"><a href="{html.escape(href, quote=True)}">{rendered}</a></p>'
+                f'<p class="printed-toc-entry toc-level-{min(level, 3)}">'
+                f'<a href="{html.escape(href, quote=True)}">{clean_inline(label)}</a></p>'
             )
         chapter.body = linked
 
