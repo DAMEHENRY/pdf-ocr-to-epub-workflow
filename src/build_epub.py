@@ -35,6 +35,7 @@ class Chapter:
     title: str
     filename: str
     body: list[str] = field(default_factory=list)
+    headings: list[tuple[str, str]] = field(default_factory=list)
 
 
 def slugify(value: str, fallback: str) -> str:
@@ -89,18 +90,54 @@ def convert_lines(
     current = Chapter("Front Matter", "chapter-000-front-matter.xhtml")
     chapters.append(current)
     pending_para: list[str] = []
+    in_code_block = False
+    code_language = ""
+    code_lines: list[str] = []
+    used_ids: dict[str, int] = {}
+
+    def heading_id(title: str) -> str:
+        base = slugify(title, "section")
+        used_ids[base] = used_ids.get(base, 0) + 1
+        return base if used_ids[base] == 1 else f"{base}-{used_ids[base]}"
+
+    def add_code_block() -> None:
+        nonlocal in_code_block, code_language
+        if not in_code_block:
+            return
+        language_class = (
+            f' class="language-{html.escape(code_language, quote=True)}"' if code_language else ""
+        )
+        current.body.append(
+            f"<pre><code{language_class}>{html.escape(chr(10).join(code_lines))}</code></pre>"
+        )
+        code_lines.clear()
+        code_language = ""
+        in_code_block = False
 
     def start_chapter(title: str) -> None:
         nonlocal current
         add_paragraph(current.body, pending_para)
         filename = f"chapter-{len(chapters):03d}-{slugify(title, f'chapter-{len(chapters):03d}')}.xhtml"
         current = Chapter(title=html.unescape(title), filename=filename)
-        current.body.append(f"<h1>{clean_inline(title)}</h1>")
+        anchor = heading_id(title)
+        current.body.append(f'<h1 id="{anchor}">{clean_inline(title)}</h1>')
+        current.headings.append((title, anchor))
         chapters.append(current)
 
     for raw_line in lines:
         line = raw_line.rstrip("\n")
         stripped = line.strip()
+        if stripped.startswith("```"):
+            add_paragraph(current.body, pending_para)
+            if in_code_block:
+                add_code_block()
+            else:
+                in_code_block = True
+                code_language = stripped[3:].strip()
+            continue
+        if in_code_block:
+            code_lines.append(line)
+            continue
         if PAGE_RE.match(stripped):
             add_paragraph(current.body, pending_para)
             continue
@@ -124,7 +161,9 @@ def convert_lines(
             else:
                 add_paragraph(current.body, pending_para)
                 tag = f"h{min(level, 6)}"
-                current.body.append(f"<{tag}>{clean_inline(title)}</{tag}>")
+                anchor = heading_id(title)
+                current.body.append(f'<{tag} id="{anchor}">{clean_inline(title)}</{tag}>')
+                current.headings.append((title, anchor))
             continue
 
         image_match = HTML_IMAGE_RE.match(stripped)
@@ -168,10 +207,65 @@ def convert_lines(
 
         for src in IMAGE_SRC_RE.findall(stripped):
             image_refs.add(normalize_image_src(src, image_prefix))
-        pending_para.append(stripped)
+        if current.title.casefold() in {"contents", "table of contents", "目录"}:
+            add_paragraph(current.body, pending_para)
+            current.body.append(f'<p class="printed-toc-entry">{clean_inline(stripped)}</p>')
+        else:
+            pending_para.append(stripped)
 
+    add_code_block()
     add_paragraph(current.body, pending_para)
     return [chapter for chapter in chapters if chapter.body], image_refs
+
+
+def normalize_toc_label(value: str) -> str:
+    value = html.unescape(re.sub(r"<[^>]+>", "", value))
+    value = re.sub(r"\s*[.…·]{2,}\s*(?:[ivxlcdm]+|\d+)\s*$", "", value, flags=re.I)
+    value = re.sub(r"\s+(?:[ivxlcdm]+|\d+)\s*$", "", value, flags=re.I)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def link_printed_contents(chapters: list[Chapter]) -> None:
+    targets: list[tuple[str, str]] = []
+    for chapter in chapters:
+        if chapter.title.casefold() in {"contents", "table of contents", "目录"}:
+            continue
+        targets.extend(
+            (normalize_toc_label(title), f"{chapter.filename}#{anchor}")
+            for title, anchor in chapter.headings
+        )
+
+    cursor = 0
+    entry_re = re.compile(r'^<p class="printed-toc-entry">(.*?)</p>$')
+    page_suffix_re = re.compile(r"(?:[.…·]{2,}\s*|\s+)(?:[ivxlcdm]+|\d+)\s*$", re.I)
+    for chapter in chapters:
+        if chapter.title.casefold() not in {"contents", "table of contents", "目录"}:
+            continue
+        linked: list[str] = []
+        for block in chapter.body:
+            match = entry_re.match(block)
+            if not match:
+                linked.append(block)
+                continue
+            rendered = match.group(1)
+            label = normalize_toc_label(rendered)
+            found = next(
+                ((index, href) for index, (title, href) in enumerate(targets[cursor:], cursor) if title == label),
+                None,
+            )
+            if found is None:
+                found = next(((index, href) for index, (title, href) in enumerate(targets) if title == label), None)
+            if found is None:
+                plain = html.unescape(re.sub(r"<[^>]+>", "", rendered))
+                if page_suffix_re.search(plain):
+                    linked.append(f'<p class="printed-toc-entry unlinked">{rendered}</p>')
+                continue
+            index, href = found
+            cursor = index + 1
+            linked.append(
+                f'<p class="printed-toc-entry"><a href="{html.escape(href, quote=True)}">{rendered}</a></p>'
+            )
+        chapter.body = linked
 
 
 def chapter_xhtml(chapter: Chapter, language: str) -> str:
@@ -190,9 +284,10 @@ def chapter_xhtml(chapter: Chapter, language: str) -> str:
 
 
 def build_nav(chapters: list[Chapter], language: str) -> str:
+    nav_chapters = [chapter for chapter in chapters if chapter.title != "Front Matter"]
     items = "\n".join(
         f'    <li><a href="xhtml/{chapter.filename}">{html.escape(chapter.title)}</a></li>'
-        for chapter in chapters
+        for chapter in nav_chapters
     )
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -236,7 +331,8 @@ def build_cover_page(title: str, language: str, cover_image: str | None = None) 
 
 def build_ncx(chapters: list[Chapter], book_id: str, title: str, author: str) -> str:
     nav_points = []
-    for idx, chapter in enumerate(chapters, 1):
+    nav_chapters = [chapter for chapter in chapters if chapter.title != "Front Matter"]
+    for idx, chapter in enumerate(nav_chapters, 1):
         nav_points.append(
             f'''    <navPoint id="navPoint-{idx}" playOrder="{idx}">
       <navLabel><text>{html.escape(chapter.title)}</text></navLabel>
@@ -368,6 +464,7 @@ def build(args: argparse.Namespace) -> None:
         title_fixes=read_title_fixes(args.title_fixes),
         promote_to_chapter=read_line_set(args.promote_to_chapter),
     )
+    link_printed_contents(chapters)
 
     cover_src: str | None = None
     if args.cover_image:
