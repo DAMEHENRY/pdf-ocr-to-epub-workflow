@@ -17,6 +17,7 @@ Use it only with material you have the right to process.
 - Creates EPUB navigation, OPF metadata, NCX table of contents, CSS, and zip packaging.
 - Converts a printed `Contents` / `目录` chapter into real links to chapter and section anchors.
 - Preserves fenced code blocks so comment lines are not mistaken for headings.
+- Detects numbered page-bottom notes that match nearby superscript references and emits linked EPUB footnotes.
 - Supports optional cleanup files for OCR noise, title fixes, and heading promotion.
 - Provides a resume-safe page-JPEG runner for large books and 8 GB GPUs.
 - Preserves confirmed GPU-OOM pages as full-page images instead of dropping them.
@@ -163,6 +164,7 @@ XML validity is necessary but not sufficient. Before delivery, verify all of the
   uses consistent chapter/subsection indentation, and makes every expected entry clickable.
 - Every internal link resolves to an existing XHTML file and `id` anchor.
 - Fenced code remains a code block; `#` comments do not become headings.
+- Page-bottom notes render smaller than body text and their reference/back links work.
 - Tables fit the viewport, images are not clipped, and long code can wrap or scroll.
 - Delete an older import before checking in Apple Books because it can cache prior navigation and covers.
 

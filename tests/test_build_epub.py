@@ -70,6 +70,48 @@ x <- 1
                     if name.endswith((".xhtml", ".opf", ".ncx")):
                         ET.fromstring(epub.read(name))
 
+    def test_page_footnote_is_linked_and_not_body_text(self) -> None:
+        markdown = """--- Page 1 / 2 ---
+
+# Chapter One
+
+Body text with a note. $ ^{4} $
+
+4 This is the page-bottom footnote, not ordinary body text.
+
+--- Page 2 / 2 ---
+
+More body text.
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            source = temp_path / "book.md"
+            source.write_text(markdown, encoding="utf-8")
+            args = type("Args", (), {
+                "input": source,
+                "output": temp_path / "book.epub",
+                "build_dir": temp_path / "build",
+                "title": "Book", "author": "Author", "language": "en",
+                "image_dir": None, "cover_image": None, "image_prefix": "imgs",
+                "css": ROOT / "assets" / "default.css", "skip_lines": None,
+                "title_fixes": None, "promote_to_chapter": None,
+            })()
+            BUILD_EPUB.build(args)
+            with zipfile.ZipFile(args.output) as epub:
+                chapter = epub.read("OEBPS/xhtml/chapter-001-chapter-one.xhtml").decode()
+                self.assertIn('epub:type="noteref"', chapter)
+                self.assertIn('href="#fn-p1-4"', chapter)
+                self.assertIn('epub:type="footnote" id="fn-p1-4"', chapter)
+                self.assertIn('href="#fnref-p1-4"', chapter)
+                self.assertNotIn("<p>4 This is the page-bottom footnote", chapter)
+                ET.fromstring(chapter)
+
+    def test_numbered_code_is_not_misclassified_as_footnote(self) -> None:
+        lines = ["--- Page 1 / 1 ---", "Body reference. $ ^{9} $", "9 egen mean_x=mean(x), by(id)"]
+        bodies, links = BUILD_EPUB.analyze_footnotes(lines)
+        self.assertEqual(bodies, {})
+        self.assertEqual(links, {})
+
 
 if __name__ == "__main__":
     unittest.main()

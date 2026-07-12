@@ -27,6 +27,7 @@ HTML_CENTER_RE = re.compile(r'<div style="text-align: center;">(.*?)</div>')
 IMAGE_SRC_RE = re.compile(r'src="([^"]+)"')
 MARKDOWN_IMAGE_RE = re.compile(r'^!\[([^]]*)\]\(([^)]+)\)$')
 FOOTNOTE_RE = re.compile(r"\$\s*\^\{([^}]+)\}\s*\$")
+FOOTNOTE_BODY_RE = re.compile(r"^\s*(\d{1,2}|[①②③④⑤⑥⑦⑧⑨⑩*])\s+(.{20,})$")
 SPACED_INITIAL_RE = re.compile(r"^(#{2,6}\s+)([A-ZI]) ([a-z].*)$")
 
 
@@ -45,10 +46,78 @@ def slugify(value: str, fallback: str) -> str:
     return value[:56] or fallback
 
 
-def clean_inline(value: str) -> str:
-    value = FOOTNOTE_RE.sub(r"<sup>\1</sup>", value)
-    value = html.escape(value, quote=False)
-    return value.replace("&lt;sup&gt;", "<sup>").replace("&lt;/sup&gt;", "</sup>")
+def normalize_footnote_number(value: str) -> str:
+    return value.strip().strip("[]")
+
+
+def looks_like_footnote_prose(value: str) -> bool:
+    value = value.lstrip('"“‘( ')
+    if not value or value.startswith("*"):
+        return False
+    first_alpha = next((char for char in value if char.isalpha()), "")
+    return bool(first_alpha and (first_alpha.isupper() or ord(first_alpha) > 127))
+
+
+def clean_inline(value: str, footnote_links: dict[str, str] | None = None) -> str:
+    replacements: list[str] = []
+
+    def replace_marker(match: re.Match[str]) -> str:
+        shown = match.group(1).strip()
+        number = normalize_footnote_number(shown)
+        key = (footnote_links or {}).get(number)
+        if key:
+            markup = (
+                f'<a epub:type="noteref" class="noteref" id="fnref-{key}" '
+                f'href="#fn-{key}"><sup>{html.escape(number)}</sup></a>'
+            )
+        else:
+            markup = f"<sup>{html.escape(shown)}</sup>"
+        token = f"@@EPUB-INLINE-{len(replacements)}@@"
+        replacements.append(markup)
+        return token
+
+    escaped = html.escape(FOOTNOTE_RE.sub(replace_marker, value), quote=False)
+    for index, markup in enumerate(replacements):
+        escaped = escaped.replace(f"@@EPUB-INLINE-{index}@@", markup)
+    return escaped
+
+
+def analyze_footnotes(lines: list[str]) -> tuple[dict[int, tuple[str, str, str]], dict[int, dict[str, str]]]:
+    page = 0
+    references: dict[int, set[str]] = {}
+    candidates: list[tuple[int, int, str, str]] = []
+    for index, line in enumerate(lines):
+        marker = PAGE_RE.match(line.strip())
+        if marker:
+            page = int(marker.group(1))
+            continue
+        references.setdefault(page, set()).update(
+            normalize_footnote_number(match.group(1)) for match in FOOTNOTE_RE.finditer(line)
+        )
+        body = FOOTNOTE_BODY_RE.match(line)
+        if body and looks_like_footnote_prose(body.group(2)):
+            candidates.append((index, page, normalize_footnote_number(body.group(1)), body.group(2)))
+
+    bodies: dict[int, tuple[str, str, str]] = {}
+    links: dict[int, dict[str, str]] = {}
+    used_refs: set[tuple[int, str]] = set()
+    for index, body_page, number, text in candidates:
+        ref_page = next(
+            (
+                candidate_page
+                for candidate_page in (body_page, body_page - 1)
+                if number in references.get(candidate_page, set())
+                and (candidate_page, number) not in used_refs
+            ),
+            None,
+        )
+        if ref_page is None:
+            continue
+        key = f"p{ref_page}-{slugify(number, 'note')}"
+        used_refs.add((ref_page, number))
+        links.setdefault(ref_page, {})[number] = key
+        bodies[index] = (key, number, text)
+    return bodies, links
 
 
 def is_ocr_noise(value: str, skip_lines: set[str]) -> bool:
@@ -62,13 +131,15 @@ def is_ocr_noise(value: str, skip_lines: set[str]) -> bool:
     return False
 
 
-def add_paragraph(target: list[str], pending: list[str]) -> None:
+def add_paragraph(
+    target: list[str], pending: list[str], footnote_links: dict[str, str] | None = None
+) -> None:
     if not pending:
         return
     text = " ".join(part.strip() for part in pending if part.strip())
     pending.clear()
     if text:
-        target.append(f"<p>{clean_inline(text)}</p>")
+        target.append(f"<p>{clean_inline(text, footnote_links)}</p>")
 
 
 def normalize_image_src(src: str, image_prefix: str) -> str:
@@ -85,6 +156,7 @@ def convert_lines(
     title_fixes: dict[str, str],
     promote_to_chapter: set[str],
 ) -> tuple[list[Chapter], set[str]]:
+    footnote_bodies, footnote_links_by_page = analyze_footnotes(lines)
     chapters: list[Chapter] = []
     image_refs: set[str] = set()
     current = Chapter("Front Matter", "chapter-000-front-matter.xhtml")
@@ -94,6 +166,10 @@ def convert_lines(
     code_language = ""
     code_lines: list[str] = []
     used_ids: dict[str, int] = {}
+    current_page = 0
+
+    def flush_paragraph() -> None:
+        add_paragraph(current.body, pending_para, footnote_links_by_page.get(current_page))
 
     def heading_id(title: str) -> str:
         base = slugify(title, "section")
@@ -116,7 +192,7 @@ def convert_lines(
 
     def start_chapter(title: str) -> None:
         nonlocal current
-        add_paragraph(current.body, pending_para)
+        flush_paragraph()
         filename = f"chapter-{len(chapters):03d}-{slugify(title, f'chapter-{len(chapters):03d}')}.xhtml"
         current = Chapter(title=html.unescape(title), filename=filename)
         anchor = heading_id(title)
@@ -124,11 +200,11 @@ def convert_lines(
         current.headings.append((title, anchor, 1))
         chapters.append(current)
 
-    for raw_line in lines:
+    for line_index, raw_line in enumerate(lines):
         line = raw_line.rstrip("\n")
         stripped = line.strip()
         if stripped.startswith("```"):
-            add_paragraph(current.body, pending_para)
+            flush_paragraph()
             if in_code_block:
                 add_code_block()
             else:
@@ -138,14 +214,25 @@ def convert_lines(
         if in_code_block:
             code_lines.append(line)
             continue
-        if PAGE_RE.match(stripped):
-            add_paragraph(current.body, pending_para)
+        page_marker = PAGE_RE.match(stripped)
+        if page_marker:
+            flush_paragraph()
+            current_page = int(page_marker.group(1))
             continue
         if not stripped:
-            add_paragraph(current.body, pending_para)
+            flush_paragraph()
             continue
         if is_ocr_noise(stripped, skip_lines):
-            add_paragraph(current.body, pending_para)
+            flush_paragraph()
+            continue
+        if line_index in footnote_bodies:
+            flush_paragraph()
+            key, number, footnote_text = footnote_bodies[line_index]
+            current.body.append(
+                f'<aside epub:type="footnote" id="fn-{key}" class="footnote"><p>'
+                f'<a class="footnote-back" href="#fnref-{key}">{html.escape(number)}</a> '
+                f'{clean_inline(footnote_text)}</p></aside>'
+            )
             continue
         stripped = SPACED_INITIAL_RE.sub(r"\1\2\3", stripped)
 
@@ -154,12 +241,12 @@ def convert_lines(
             level = len(heading.group(1))
             title = title_fixes.get(heading.group(2).strip(), heading.group(2).strip())
             if title in skip_lines:
-                add_paragraph(current.body, pending_para)
+                flush_paragraph()
                 continue
             if title in promote_to_chapter or level == 1:
                 start_chapter(title)
             else:
-                add_paragraph(current.body, pending_para)
+                flush_paragraph()
                 tag = f"h{min(level, 6)}"
                 anchor = heading_id(title)
                 current.body.append(f'<{tag} id="{anchor}">{clean_inline(title)}</{tag}>')
@@ -168,7 +255,7 @@ def convert_lines(
 
         image_match = HTML_IMAGE_RE.match(stripped)
         if image_match:
-            add_paragraph(current.body, pending_para)
+            flush_paragraph()
             src, alt, width = image_match.groups()
             src = normalize_image_src(src, image_prefix)
             image_refs.add(src)
@@ -182,7 +269,7 @@ def convert_lines(
 
         markdown_image = MARKDOWN_IMAGE_RE.match(stripped)
         if markdown_image:
-            add_paragraph(current.body, pending_para)
+            flush_paragraph()
             alt, src = markdown_image.groups()
             src = normalize_image_src(src, image_prefix)
             image_refs.add(src)
@@ -195,26 +282,26 @@ def convert_lines(
             continue
 
         if stripped.startswith("<table") and stripped.endswith("</table>"):
-            add_paragraph(current.body, pending_para)
+            flush_paragraph()
             current.body.append(re.sub(r"\bborder=([0-9]+)", r'border="\1"', stripped))
             continue
 
         center_match = HTML_CENTER_RE.match(stripped)
         if center_match:
-            add_paragraph(current.body, pending_para)
+            flush_paragraph()
             current.body.append(f'<p class="center">{clean_inline(center_match.group(1))}</p>')
             continue
 
         for src in IMAGE_SRC_RE.findall(stripped):
             image_refs.add(normalize_image_src(src, image_prefix))
         if current.title.casefold() in {"contents", "table of contents", "目录"}:
-            add_paragraph(current.body, pending_para)
+            flush_paragraph()
             current.body.append(f'<p class="printed-toc-entry">{clean_inline(stripped)}</p>')
         else:
             pending_para.append(stripped)
 
     add_code_block()
-    add_paragraph(current.body, pending_para)
+    flush_paragraph()
     return [chapter for chapter in chapters if chapter.body], image_refs
 
 
@@ -272,7 +359,7 @@ def link_printed_contents(chapters: list[Chapter]) -> None:
 def chapter_xhtml(chapter: Chapter, language: str) -> str:
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" lang="{language}" xml:lang="{language}">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="{language}" xml:lang="{language}">
 <head>
   <title>{html.escape(chapter.title)}</title>
   <link rel="stylesheet" type="text/css" href="../styles.css" />
