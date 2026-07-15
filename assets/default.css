@@ -130,6 +130,13 @@ math {
   max-width: 100%;
 }
 
+.external-link {
+  color: #245c9f;
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  word-break: break-word;
+}
+
 .cover-page {
   margin: 0;
 }

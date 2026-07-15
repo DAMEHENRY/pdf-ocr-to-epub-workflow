@@ -38,6 +38,8 @@ MATH_RE = re.compile(
     r"\$\$\s*(.+?)\s*\$\$|(?<![\w$])\$(?!\$)\s*(.+?)\s*(?<!\$)\$(?!\$)"
 )
 DISPLAY_MATH_RE = re.compile(r"^\$\$\s*(.+?)\s*\$\$$")
+URL_RE = re.compile(r"https?://[^\s<>\"']+")
+URL_TRAILING_PUNCTUATION = ".,;:!?)]}，。；：！？、"
 
 
 @dataclass
@@ -161,7 +163,23 @@ def clean_inline(value: str, footnote_links: dict[str, str] | None = None) -> st
         replacements.append(render_math(latex, display=bool(match.group(1))))
         return token
 
-    escaped = html.escape(MATH_RE.sub(replace_math, tokenized), quote=False)
+    tokenized = MATH_RE.sub(replace_math, tokenized)
+
+    def replace_url(match: re.Match[str]) -> str:
+        matched = match.group(0)
+        url = matched.rstrip(URL_TRAILING_PUNCTUATION)
+        trailing = matched[len(url) :]
+        if not url:
+            return matched
+        markup = (
+            f'<a class="external-link" href="{html.escape(url, quote=True)}">'
+            f'{html.escape(url, quote=False)}</a>{html.escape(trailing, quote=False)}'
+        )
+        token = f"@@EPUB-INLINE-{len(replacements)}@@"
+        replacements.append(markup)
+        return token
+
+    escaped = html.escape(URL_RE.sub(replace_url, tokenized), quote=False)
     for index, markup in enumerate(replacements):
         escaped = escaped.replace(f"@@EPUB-INLINE-{index}@@", markup)
     return escaped

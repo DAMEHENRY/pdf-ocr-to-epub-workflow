@@ -22,6 +22,7 @@ Use it only with material you have the right to process.
 - Supports tab-separated footnote repairs recovered from the original PDF text layer when OCR omits a note.
 - Converts inline and display LaTeX to EPUB-native MathML, including the required OPF `mathml` property.
 - Distinguishes LaTeX dollar delimiters from R operators such as `%$%` and `data$column`.
+- Turns complete prose URLs into clickable external links with EPUB-safe wrapping and punctuation handling.
 - Removes PDF page markers without forcing a paragraph break when prose clearly continues across pages.
 - Supports optional cleanup files for OCR noise, title fixes, and heading promotion.
 - Provides a resume-safe page-JPEG runner for large books and 8 GB GPUs.
@@ -193,6 +194,8 @@ XML validity is necessary but not sufficient. Before delivery, verify all of the
   page-bottom note text appears between the two halves of the sentence.
 - Inline, fractional, and multiline formulas render as MathML rather than visible `$` delimiters and LaTeX commands;
   formula-bearing XHTML manifest items declare the `mathml` property.
+- Prose URLs are clickable, exclude trailing sentence punctuation from `href`, and wrap without widening the page.
+  Compare suspicious OCR spellings with the source PDF before making them active links.
 - Tables fit the viewport, images are not clipped, and long code can wrap or scroll.
 - Delete an older import before checking in Apple Books because it can cache prior navigation and covers.
 
