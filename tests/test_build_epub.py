@@ -136,6 +136,97 @@ A genuinely new paragraph starts here.
         )
         self.assertIn("<p>A genuinely new paragraph starts here.</p>", chapter)
 
+    def test_page_bottom_footnote_does_not_split_cross_page_paragraph(self) -> None:
+        markdown = """--- Page 1 / 2 ---
+
+# Chapter One
+
+Those models describe the phenomena of $ ^{5} $
+
+5 A real page-bottom note that should remain separately linked.
+
+--- Page 2 / 2 ---
+
+interest and make falsifiable predictions.
+"""
+        chapters, _ = BUILD_EPUB.convert_lines(
+            markdown.splitlines(), image_prefix="imgs", skip_lines=set(),
+            title_fixes={}, promote_to_chapter=set()
+        )
+        chapter = "\n".join(chapters[0].body)
+        self.assertIn(
+            'Those models describe the phenomena of <a epub:type="noteref"', chapter
+        )
+        self.assertIn("</sup></a> interest and make falsifiable predictions.</p>", chapter)
+        self.assertIn('epub:type="footnote" id="fn-p1-5"', chapter)
+
+    def test_latex_is_emitted_as_epub_mathml(self) -> None:
+        markdown = """# Chapter One
+
+The elasticity is $ \\delta $.
+
+$$ \\epsilon=\\frac{\\partial\\log Q}{\\partial\\log P} $$
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            source = temp_path / "book.md"
+            source.write_text(markdown, encoding="utf-8")
+            args = type("Args", (), {
+                "input": source,
+                "output": temp_path / "book.epub",
+                "build_dir": temp_path / "build",
+                "title": "Book",
+                "author": "Author",
+                "language": "en",
+                "image_dir": None,
+                "cover_image": None,
+                "image_prefix": "imgs",
+                "css": ROOT / "assets" / "default.css",
+                "skip_lines": None,
+                "title_fixes": None,
+                "promote_to_chapter": None,
+            })()
+            BUILD_EPUB.build(args)
+            with zipfile.ZipFile(args.output) as epub:
+                chapter = epub.read("OEBPS/xhtml/chapter-001-chapter-one.xhtml").decode()
+                opf = epub.read("OEBPS/content.opf").decode()
+                self.assertIn('xmlns="http://www.w3.org/1998/Math/MathML"', chapter)
+                self.assertIn('display="block"', chapter)
+                self.assertNotIn("$$", chapter)
+                self.assertIn('properties="mathml"', opf)
+                ET.fromstring(chapter)
+
+        aligned = BUILD_EPUB.render_math(r"A &= B \\ &+ C", display=True)
+        ET.fromstring(aligned)
+
+    def test_missing_ocr_footnote_can_be_repaired_from_pdf_text(self) -> None:
+        markdown = """--- Page 23 / 23 ---
+
+# Chapter One
+
+Body reference. $ ^{8} $
+"""
+        lines = BUILD_EPUB.inject_footnote_fixes(
+            markdown.splitlines(),
+            {23: [("8", "Recovered source-PDF footnote text that OCR had omitted.")]},
+        )
+        chapters, _ = BUILD_EPUB.convert_lines(
+            lines, image_prefix="imgs", skip_lines=set(),
+            title_fixes={}, promote_to_chapter=set()
+        )
+        chapter = "\n".join(chapters[0].body)
+        self.assertIn('href="#fn-p23-8"', chapter)
+        self.assertIn('id="fn-p23-8"', chapter)
+        self.assertIn("Recovered source-PDF footnote text", chapter)
+
+    def test_r_dollar_operator_is_not_treated_as_latex(self) -> None:
+        rendered = BUILD_EPUB.clean_inline(
+            "combo <- data %$% transform(x) and sum(combo$correct == 1)"
+        )
+        self.assertNotIn("<math", rendered)
+        self.assertIn("%$%", rendered)
+        self.assertIn("combo$correct", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
