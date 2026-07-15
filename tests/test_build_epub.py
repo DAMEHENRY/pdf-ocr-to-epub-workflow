@@ -227,6 +227,17 @@ Body reference. $ ^{8} $
         self.assertIn("%$%", rendered)
         self.assertIn("combo$correct", rendered)
 
+    def test_plain_prose_url_becomes_clickable_without_trailing_punctuation(self) -> None:
+        rendered = BUILD_EPUB.clean_inline(
+            "Read https://example.org/a/very-long-file.pdf, then continue."
+        )
+        self.assertIn(
+            '<a class="external-link" href="https://example.org/a/very-long-file.pdf">',
+            rendered,
+        )
+        self.assertIn("</a>, then continue.", rendered)
+        ET.fromstring(f"<p>{rendered}</p>")
+
 
 if __name__ == "__main__":
     unittest.main()
