@@ -115,6 +115,21 @@ code {
   text-decoration: none;
 }
 
+math {
+  font-size: 1em;
+}
+
+.math-display {
+  margin: 1em 0;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.math-display math {
+  margin: 0 auto;
+  max-width: 100%;
+}
+
 .cover-page {
   margin: 0;
 }

@@ -17,6 +17,11 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    from latex2mathml.converter import convert as latex_to_mathml
+except ImportError:  # pragma: no cover - exercised only when the optional dependency is absent
+    latex_to_mathml = None
+
 
 PAGE_RE = re.compile(r"^--- Page (\d+) / \d+ ---$")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -29,6 +34,10 @@ MARKDOWN_IMAGE_RE = re.compile(r'^!\[([^]]*)\]\(([^)]+)\)$')
 FOOTNOTE_RE = re.compile(r"\$\s*\^\{([^}]+)\}\s*\$")
 FOOTNOTE_BODY_RE = re.compile(r"^\s*(\d{1,2}|[①②③④⑤⑥⑦⑧⑨⑩*])\s+(.{20,})$")
 SPACED_INITIAL_RE = re.compile(r"^(#{2,6}\s+)([A-ZI]) ([a-z].*)$")
+MATH_RE = re.compile(
+    r"\$\$\s*(.+?)\s*\$\$|(?<![\w$])\$(?!\$)\s*(.+?)\s*(?<!\$)\$(?!\$)"
+)
+DISPLAY_MATH_RE = re.compile(r"^\$\$\s*(.+?)\s*\$\$$")
 
 
 @dataclass
@@ -62,6 +71,27 @@ def next_nonblank_line(lines: list[str], start: int) -> str:
     return next((line.strip() for line in lines[start:] if line.strip()), "")
 
 
+def next_flow_line(
+    lines: list[str], start: int, footnote_body_indexes: set[int]
+) -> tuple[str, bool]:
+    """Return the next prose line and whether a PDF page boundary was crossed.
+
+    Page-bottom footnotes sit between the two halves of a paragraph in OCR
+    order. They are metadata for reflow purposes and must not force a visible
+    paragraph break.
+    """
+    crossed_page = False
+    for index in range(start, len(lines)):
+        stripped = lines[index].strip()
+        if not stripped or index in footnote_body_indexes:
+            continue
+        if PAGE_RE.match(stripped):
+            crossed_page = True
+            continue
+        return stripped, crossed_page
+    return "", crossed_page
+
+
 def should_join_page_break(pending: list[str], next_line: str) -> bool:
     if not pending or not next_line or HEADING_RE.match(next_line):
         return False
@@ -70,6 +100,37 @@ def should_join_page_break(pending: list[str], next_line: str) -> bool:
     previous = pending[-1].rstrip()
     previous_unfinished = bool(previous and previous[-1] not in ".!?。！？:：")
     return starts_lower or previous_unfinished
+
+
+def render_math(latex: str, *, display: bool) -> str:
+    latex = latex.strip()
+    if re.fullmatch(r"\[?\d{4}\]?", latex):
+        return html.escape(latex, quote=False)
+    if latex_to_mathml is None:
+        raise RuntimeError(
+            "LaTeX math was found, but latex2mathml is not installed. "
+            "Run: python3 -m pip install latex2mathml"
+        )
+    try:
+        markup = latex_to_mathml(latex)
+    except Exception as exc:
+        raise ValueError(f"Could not convert LaTeX expression: {latex!r}") from exc
+    markup = re.sub(
+        r"&(?!#\d+;|#x[0-9A-Fa-f]+;|[A-Za-z][A-Za-z0-9]+;)", "&amp;", markup
+    )
+    if display:
+        markup = markup.replace('display="inline"', 'display="block"', 1)
+    return markup
+
+
+def looks_like_latex(value: str) -> bool:
+    """Reject dollar signs used by R code or currency before MathML conversion."""
+    value = value.strip()
+    if not value or len(value) > 500:
+        return False
+    if value.startswith("%") or "%>%" in value or "%> %" in value or "%$%" in value:
+        return False
+    return True
 
 
 def clean_inline(value: str, footnote_links: dict[str, str] | None = None) -> str:
@@ -90,7 +151,17 @@ def clean_inline(value: str, footnote_links: dict[str, str] | None = None) -> st
         replacements.append(markup)
         return token
 
-    escaped = html.escape(FOOTNOTE_RE.sub(replace_marker, value), quote=False)
+    tokenized = FOOTNOTE_RE.sub(replace_marker, value)
+
+    def replace_math(match: re.Match[str]) -> str:
+        latex = (match.group(1) or match.group(2)).strip()
+        if not looks_like_latex(latex):
+            return match.group(0)
+        token = f"@@EPUB-INLINE-{len(replacements)}@@"
+        replacements.append(render_math(latex, display=bool(match.group(1))))
+        return token
+
+    escaped = html.escape(MATH_RE.sub(replace_math, tokenized), quote=False)
     for index, markup in enumerate(replacements):
         escaped = escaped.replace(f"@@EPUB-INLINE-{index}@@", markup)
     return escaped
@@ -182,11 +253,15 @@ def convert_lines(
     used_ids: dict[str, int] = {}
     current_page = 0
     pending_footnote_links: dict[str, str] = {}
+    pending_footnotes: list[str] = []
     carrying_page_break = False
 
     def flush_paragraph() -> None:
         add_paragraph(current.body, pending_para, pending_footnote_links)
         pending_footnote_links.clear()
+        if pending_footnotes:
+            current.body.extend(pending_footnotes)
+            pending_footnotes.clear()
 
     def heading_id(title: str) -> str:
         base = slugify(title, "section")
@@ -240,7 +315,12 @@ def convert_lines(
             current_page = int(page_marker.group(1))
             continue
         if not stripped:
-            if PAGE_RE.match(next_nonblank_line(lines, line_index + 1)) or carrying_page_break:
+            next_line, crosses_page = next_flow_line(
+                lines, line_index + 1, set(footnote_bodies)
+            )
+            if carrying_page_break or (
+                crosses_page and should_join_page_break(pending_para, next_line)
+            ):
                 continue
             flush_paragraph()
             continue
@@ -249,12 +329,19 @@ def convert_lines(
             flush_paragraph()
             continue
         if line_index in footnote_bodies:
-            flush_paragraph()
             key, number, footnote_text = footnote_bodies[line_index]
-            current.body.append(
+            pending_footnotes.append(
                 f'<aside epub:type="footnote" id="fn-{key}" class="footnote"><p>'
                 f'<a class="footnote-back" href="#fnref-{key}">{html.escape(number)}</a> '
                 f'{clean_inline(footnote_text)}</p></aside>'
+            )
+            continue
+
+        display_math = DISPLAY_MATH_RE.match(stripped)
+        if display_math:
+            flush_paragraph()
+            current.body.append(
+                f'<div class="math-display">{render_math(display_math.group(1), display=True)}</div>'
             )
             continue
         stripped = SPACED_INITIAL_RE.sub(r"\1\2\3", stripped)
@@ -495,8 +582,10 @@ def build_opf(
     spine = ['<itemref idref="cover-page" linear="no"/>']
     for idx, chapter in enumerate(chapters):
         item_id = f"chapter-{idx:03d}"
+        properties = ' properties="mathml"' if any("<math " in block for block in chapter.body) else ""
         manifest.append(
-            f'<item id="{item_id}" href="xhtml/{chapter.filename}" media-type="application/xhtml+xml"/>'
+            f'<item id="{item_id}" href="xhtml/{chapter.filename}" '
+            f'media-type="application/xhtml+xml"{properties}/>'
         )
         spine.append(f'<itemref idref="{item_id}"/>')
     for idx, src in enumerate(sorted(image_refs)):
@@ -553,6 +642,53 @@ def read_title_fixes(path: Path | None) -> dict[str, str]:
     return fixes
 
 
+def read_footnote_fixes(path: Path | None) -> dict[int, list[tuple[str, str]]]:
+    """Read page<TAB>marker<TAB>text repairs recovered from the source PDF."""
+    if not path:
+        return {}
+    fixes: dict[int, list[tuple[str, str]]] = {}
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        parts = line.split("\t", 2)
+        if len(parts) != 3 or not parts[0].isdigit():
+            raise ValueError(
+                f"Invalid footnote fix at {path}:{line_number}; expected page<TAB>marker<TAB>text"
+            )
+        page, marker, text = int(parts[0]), parts[1].strip(), parts[2].strip()
+        if not marker or not text:
+            raise ValueError(f"Empty footnote fix at {path}:{line_number}")
+        fixes.setdefault(page, []).append((marker, text))
+    return fixes
+
+
+def inject_footnote_fixes(
+    lines: list[str], fixes: dict[int, list[tuple[str, str]]]
+) -> list[str]:
+    if not fixes:
+        return lines
+    injected: list[str] = []
+    current_page = 0
+    applied: set[int] = set()
+
+    def append_page_fixes(page: int) -> None:
+        if page in fixes and page not in applied:
+            injected.extend(f"{marker} {text}" for marker, text in fixes[page])
+            applied.add(page)
+
+    for line in lines:
+        marker = PAGE_RE.match(line.strip())
+        if marker:
+            append_page_fixes(current_page)
+            current_page = int(marker.group(1))
+        injected.append(line)
+    append_page_fixes(current_page)
+    missing_pages = sorted(set(fixes) - applied)
+    if missing_pages:
+        raise ValueError(f"Footnote fixes refer to absent PDF pages: {missing_pages}")
+    return injected
+
+
 def build(args: argparse.Namespace) -> None:
     source_md = args.input.resolve()
     output = args.output.resolve()
@@ -569,8 +705,12 @@ def build(args: argparse.Namespace) -> None:
     meta_inf.mkdir(parents=True)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    chapters, image_refs = convert_lines(
+    source_lines = inject_footnote_fixes(
         source_md.read_text(encoding="utf-8").splitlines(),
+        read_footnote_fixes(getattr(args, "footnote_fixes", None)),
+    )
+    chapters, image_refs = convert_lines(
+        source_lines,
         image_prefix=args.image_prefix,
         skip_lines=read_line_set(args.skip_lines),
         title_fixes=read_title_fixes(args.title_fixes),
@@ -646,6 +786,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--css", default=Path("assets/default.css"), type=Path, help="CSS file to embed")
     parser.add_argument("--skip-lines", type=Path, help="Optional newline-delimited OCR noise lines to drop")
     parser.add_argument("--title-fixes", type=Path, help="Optional title fixes file: old => new")
+    parser.add_argument(
+        "--footnote-fixes",
+        type=Path,
+        help="Optional tab-separated repairs: PDF page, marker, recovered note text",
+    )
     parser.add_argument("--promote-to-chapter", type=Path, help="Optional newline-delimited headings to promote")
     return parser.parse_args()
 

@@ -18,6 +18,10 @@ Use it only with material you have the right to process.
 - Converts a printed `Contents` / `目录` chapter into real links to chapter and section anchors.
 - Preserves fenced code blocks so comment lines are not mistaken for headings.
 - Detects numbered page-bottom notes that match nearby superscript references and emits linked EPUB footnotes.
+- Keeps page-bottom footnote metadata from splitting a sentence that continues onto the next PDF page.
+- Supports tab-separated footnote repairs recovered from the original PDF text layer when OCR omits a note.
+- Converts inline and display LaTeX to EPUB-native MathML, including the required OPF `mathml` property.
+- Distinguishes LaTeX dollar delimiters from R operators such as `%$%` and `data$column`.
 - Removes PDF page markers without forcing a paragraph break when prose clearly continues across pages.
 - Supports optional cleanup files for OCR noise, title fixes, and heading promotion.
 - Provides a resume-safe page-JPEG runner for large books and 8 GB GPUs.
@@ -25,6 +29,12 @@ Use it only with material you have the right to process.
 - Supports Markdown image fallbacks, OCR HTML tables, and an optional real cover image.
 
 ## Quick Start
+
+Install the lightweight EPUB-builder dependency:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
 
 Run the EPUB sample:
 
@@ -36,6 +46,18 @@ python3 src/build_epub.py \
   --author "Example Author" \
   --skip-lines examples/skip-lines.txt
 ```
+
+If OCR captured a superscript reference but dropped its page-bottom note, recover
+the note from the original PDF text layer and add a UTF-8 tab-separated repair
+file:
+
+```text
+# PDF page<TAB>marker<TAB>recovered note text
+23	8	One of the things implied by ceteris paribus ...
+```
+
+Then add `--footnote-fixes footnote-fixes.tsv`. Repairs are accepted only as
+explicit source-backed input; the builder does not invent missing note text.
 
 ## OCR Model Downloads
 
@@ -165,8 +187,12 @@ XML validity is necessary but not sufficient. Before delivery, verify all of the
   uses consistent chapter/subsection indentation, and makes every expected entry clickable.
 - Every internal link resolves to an existing XHTML file and `id` anchor.
 - Fenced code remains a code block; `#` comments do not become headings.
-- Page-bottom notes render smaller than body text and their reference/back links work.
-- Mid-paragraph PDF page boundaries do not create artificial blank lines in reflowable text.
+- Page-bottom notes render smaller than body text and their reference/back links work. Audit unresolved
+  superscripts; recover OCR-omitted note text from the source PDF into `--footnote-fixes` rather than inventing it.
+- Mid-paragraph PDF page boundaries do not create artificial blank lines in reflowable text, including when
+  page-bottom note text appears between the two halves of the sentence.
+- Inline, fractional, and multiline formulas render as MathML rather than visible `$` delimiters and LaTeX commands;
+  formula-bearing XHTML manifest items declare the `mathml` property.
 - Tables fit the viewport, images are not clipped, and long code can wrap or scroll.
 - Delete an older import before checking in Apple Books because it can cache prior navigation and covers.
 
